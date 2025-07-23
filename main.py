@@ -4,7 +4,7 @@ from typing import Optional
 import logging
 from datetime import datetime, timedelta
 import os
-from StackadaptToBigQueryPipeline import StackAdaptToBigQueryPipeline
+from StackAdaptToBigQueryPipeline import StackAdaptToBigQueryPipeline
 
 # Configure logging
 logging.basicConfig(
