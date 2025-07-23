@@ -137,13 +137,27 @@ class StackAdaptClient:
                             campaign {
                               id
                               name
+                              campaignGoal {
+                                goalsConnection(first:1) {
+                                  edges {
+                                    node {
+                                      goalType
+                                    }
+                                  }
+                                }
+                              }
+                              goalType
+                              campaignGroup {
+                                id
+                                name
+                                advertiser {
+                                  id
+                                  name
+                                }
+                              }
                             }
                           }
                           date
-                        }
-                        campaignGroup {
-                          id
-                          name
                         }
                         metrics {
                           clicks
@@ -224,24 +238,27 @@ class StackAdaptClient:
                             campaignGroup {
                               id
                               name
+                              advertiser {
+                                id
+                                name
+                              }
                             }
                           }
                         }
                         date
-                        
                       }
                       metrics {
-                                clicks
-                                clickConversions
-                                engagements
-                                videoStarts
-                                videoQ1Playbacks
-                                videoQ2Playbacks
-                                videoQ3Playbacks
-                                videoCompletions
-                                impressions
-                                frequency
-                                cost
+                        clicks
+                        clickConversions
+                        engagements
+                        videoStarts
+                        videoQ1Playbacks
+                        videoQ2Playbacks
+                        videoQ3Playbacks
+                        videoCompletions
+                        impressions
+                        frequency
+                        cost
                       }
                     }
                   }
