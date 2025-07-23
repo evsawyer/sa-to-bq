@@ -1,168 +1,129 @@
-import requests
-import json
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from pydantic import BaseModel
+from typing import Optional
+import logging
+from datetime import datetime, timedelta
 import os
-import time
-from dotenv import load_dotenv
+from StackadaptToBigQueryPipeline import StackAdaptToBigQueryPipeline
 
-# Load environment variables from .env file
-load_dotenv()
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
+app = FastAPI(
+    title="StackAdapt to BigQuery API",
+    description="API for syncing StackAdapt ads data to BigQuery",
+    version="1.0.0"
+)
 
-def ping_graphql_api(endpoint_url: str, query: str, variables: dict = None, headers: dict = None):
+class SyncRequest(BaseModel):
+    days_back: Optional[int] = 30
+    use_bulk: Optional[bool] = True
+    dataset_id: Optional[str] = "raw_ads"
+    project_id: Optional[str] = None  # Will use default from BigQueryClient if None
+
+class SyncResponse(BaseModel):
+    status: str
+    message: str
+    records_synced: Optional[int] = None
+    execution_time_seconds: Optional[float] = None
+    timestamp: str
+    date_range: Optional[dict] = None
+
+@app.get("/")
+async def root():
+    """Health check endpoint"""
+    return {"message": "StackAdapt to BigQuery API is running"}
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for Cloud Run"""
+    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+
+@app.post("/sync-ads-insights", response_model=SyncResponse)
+async def sync_ads_insights(request: Optional[SyncRequest] = None, background_tasks: BackgroundTasks = None):
     """
-    Send a raw GraphQL request to the specified endpoint
+    Sync StackAdapt ads performance data to BigQuery
+    
+    Args:
+        request: Optional SyncRequest with configuration parameters (uses defaults if not provided)
+        
+    Returns:
+        SyncResponse with sync results
     """
-    payload = {
-        "query": query,
-        "variables": variables or {}
-    }
+    start_time = datetime.utcnow()
     
-    # Get API key from environment
-    api_key = os.getenv('STACKADAPT_API_KEY')
-    if not api_key:
-        print("Warning: STACKADAPT_API_KEY not found in environment variables")
-    
-    default_headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Authorization": f"Bearer {api_key}" if api_key else ""
-    }
-    
-    if headers:
-        default_headers.update(headers)
+    # Use defaults if no request body provided
+    if request is None:
+        request = SyncRequest()
     
     try:
-        response = requests.post(
-            endpoint_url,
-            json=payload,
-            headers=default_headers,
-            timeout=30
+        # Calculate date range
+        date_to = datetime.now().strftime("%Y-%m-%d")
+        date_from = (datetime.now() - timedelta(days=request.days_back)).strftime("%Y-%m-%d")
+        
+        logger.info(f"Starting StackAdapt sync with {request.days_back} days back")
+        logger.info(f"Date range: {date_from} to {date_to}")
+        logger.info(f"Using bulk mode: {request.use_bulk}")
+        
+        # Initialize pipeline
+        pipeline = StackAdaptToBigQueryPipeline(
+            dataset_id=request.dataset_id,
+            project_id=request.project_id
         )
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        print(f"GraphQL request failed: {e}")
-        return None
-
-
-def get_all_advertiser_ids(endpoint_url: str):
-    """
-    Fetch all advertiser IDs from the GraphQL API
-    """
-    query = """
-        query GetAllAdvertiserIds {
-          advertisers(first: 100) {
-            edges {
-              node {
-                id
-                name
-              }
-            }
-          }
-        }
-    """
-    
-    result = ping_graphql_api(endpoint_url, query)
-    
-    if result and 'data' in result and 'advertisers' in result['data']:
-        advertiser_ids = []
-        for edge in result['data']['advertisers']['edges']:
-            advertiser_ids.append(edge['node']['id'])
-        return advertiser_ids
-    else:
-        print("Failed to fetch advertiser IDs")
-        return []
-
-
-def get_ad_insights_by_day(endpoint_url: str, advertiser_id: str):
-    """
-    Fetch ad insights for a single advertiser ID
-    """
-    query = """
-        query GetAdInsightsByDay($ids: [ID!]!) {
-          campaignGroupInsight(
-            attributes: [AD, DATE]
-            date: {
-              from: "2020-06-01"
-              to: "2025-07-31"
-            }
-            filterBy: {
-              advertiserIds: $ids
-            }
-          ) {
-            ... on CampaignGroupInsightOutcome {
-              records {
-                edges {
-                  node {
-                    attributes {
-                      ad {
-                        id
-                        name
-                      }
-                      date
-                    }
-                    campaignGroup {
-                      id
-                      name
-                    }
-                    metrics {
-                      impressions
-                      clicks
-                      cost
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-    """
-    
-    variables = {"ids": [advertiser_id]}
-    result = ping_graphql_api(endpoint_url, query, variables)
-    
-    return result
-
-
-def main():
-    endpoint = "https://api.stackadapt.com/graphql"
-    
-    # Step 1: Get all advertiser IDs
-    print("Fetching all advertiser IDs...")
-    advertiser_ids = get_all_advertiser_ids(endpoint)
-    
-    if not advertiser_ids:
-        print("No advertiser IDs found. Exiting.")
-        return
-    
-    print(f"Found {len(advertiser_ids)} advertiser IDs: {advertiser_ids}")
-    
-    # Step 2: Get ad insights for each advertiser ID individually
-    print("Fetching ad insights for each advertiser...")
-    all_results = []
-    
-    for i, advertiser_id in enumerate(advertiser_ids, 1):
-        print(f"Processing advertiser {i}/{len(advertiser_ids)}: {advertiser_id}")
-        result = get_ad_insights_by_day(endpoint, advertiser_id)
         
-        if result:
-            all_results.append(result)
-            print(f"✓ Successfully fetched data for advertiser {advertiser_id}")
+        # Sync ads performance data to temp table
+        logger.info(f"Syncing ads performance data for last {request.days_back} days...")
+        count = pipeline.sync_ads_performance(
+            use_bulk=request.use_bulk,
+            days_back=request.days_back
+        )
+        logger.info(f"Synced {count} performance records to temp table")
+        
+        # Merge temp data into main table if we got records
+        merge_success = False
+        if count > 0:
+            logger.info("Merging temp data into main stackadapt_ads table...")
+            merge_success = pipeline.merge_ads_performance()
+            if merge_success:
+                logger.info("Successfully merged data into main table")
+            else:
+                logger.warning("Failed to merge data into main table, but temp table has data")
         else:
-            print(f"✗ Failed to fetch data for advertiser {advertiser_id}")
+            logger.info("No performance data to merge")
         
-        # Add delay between requests to avoid rate limiting
-        if i < len(advertiser_ids):  # Don't delay after the last request
-            time.sleep(1)
-    
-    # Step 3: Display aggregated results
-    if all_results:
-        print(f"\nSuccessfully processed {len(all_results)} advertisers")
-        print("Combined Ad Insights Response:")
-        print(json.dumps(all_results, indent=2))
-    else:
-        print("Failed to get ad insights from any advertiser")
-
-
-if __name__ == "__main__":
-    main()
+        end_time = datetime.utcnow()
+        execution_time = (end_time - start_time).total_seconds()
+        
+        return SyncResponse(
+            status="success",
+            message=f"Successfully synced {count} records{' and merged to main table' if merge_success else ' to temp table'}",
+            records_synced=count,
+            execution_time_seconds=execution_time,
+            timestamp=end_time.isoformat(),
+            date_range={
+                "from": date_from,
+                "to": date_to,
+                "days_back": request.days_back
+            }
+        )
+        
+    except Exception as e:
+        error_msg = f"Error syncing StackAdapt data: {str(e)}"
+        logger.error(error_msg)
+        
+        end_time = datetime.utcnow()
+        execution_time = (end_time - start_time).total_seconds()
+        
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "status": "error",
+                "message": error_msg,
+                "execution_time_seconds": execution_time,
+                "timestamp": end_time.isoformat()
+            }
+        )
